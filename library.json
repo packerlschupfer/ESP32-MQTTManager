@@ -1,0 +1,32 @@
+{
+  "name": "ESP32-MQTTManager",
+  "version": "0.1.0",
+  "description": "MQTT client manager for ESP32 with auto-reconnect, event groups, and thread-safe operations",
+  "keywords": [
+    "mqtt",
+    "iot",
+    "esp32",
+    "connectivity",
+    "freertos",
+    "event-driven"
+  ],
+  "authors": [
+    {
+      "name": "packerlschupfer",
+      "email": "packerlschupfer@noreply.github.com",
+      "maintainer": true
+    }
+  ],
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/packerlschupfer/ESP32-MQTTManager.git"
+  },
+  "homepage": "https://github.com/packerlschupfer/ESP32-MQTTManager",
+  "license": "GPL-3",
+  "frameworks": ["arduino"],
+  "platforms": ["espressif32"],
+  "include": "MQTTManager.h",
+  "dependencies": {
+    "ESP32-LibraryCommon": "https://github.com/packerlschupfer/ESP32-LibraryCommon.git"
+  }
+}
