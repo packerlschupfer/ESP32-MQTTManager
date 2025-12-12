@@ -565,16 +565,20 @@ void MQTTManager::enableDebugging(bool enable) {
 
 void MQTTManager::onConnect() {
     if (!mutex) return;
-    
+
     xSemaphoreTake(mutex, portMAX_DELAY);
     connected = true;
-    
+
+    // Reset reconnection state on successful connection
+    reconnectAttempts = 0;
+    currentReconnectDelay = reconnectConfig.minInterval;
+
     MQTTM_LOG_I("MQTT connected");
     xSemaphoreGive(mutex);
-    
+
     // Notify event (outside mutex to avoid deadlock)
     notifyEvent(MQTTEvent::CONNECTED);
-    
+
     // Stop reconnect timer if running
     if (reconnectTimer) {
         xTimerStop(reconnectTimer, 0);
@@ -940,13 +944,15 @@ void MQTTManager::reconnectTimerCallback(TimerHandle_t xTimer) {
             manager->reconnectAttempts + 1,
             manager->reconnectConfig.maxAttempts);
 
+        // Increment attempt counter BEFORE calling connect()
+        // Note: connect() is async - it returns Ok when connection is initiated,
+        // not when actually connected. The actual success resets counters in onConnect()
+        manager->reconnectAttempts++;
+
         auto result = manager->connect();
-        if (result.isOk()) {
-            // Reset on successful connection
-            manager->currentReconnectDelay = manager->reconnectConfig.minInterval;
-            manager->reconnectAttempts = 0;
-        } else {
-            manager->reconnectAttempts++;
+        if (!result.isOk()) {
+            // Connection initiation failed immediately - schedule retry
+            MQTTM_LOG_W("Connection initiation failed (error code: %d)", static_cast<int>(result.error()));
 
             // Calculate next delay with exponential backoff
             if (manager->reconnectConfig.exponentialBackoff) {
@@ -961,6 +967,9 @@ void MQTTManager::reconnectTimerCallback(TimerHandle_t xTimer) {
                 pdMS_TO_TICKS(manager->currentReconnectDelay), 0);
             xTimerStart(manager->reconnectTimer, 0);
         }
+        // If connect() returned Ok, connection is in progress.
+        // Timer will be restarted by onDisconnect() if connection fails,
+        // or stopped by onConnect() if connection succeeds.
     }
 }
 
