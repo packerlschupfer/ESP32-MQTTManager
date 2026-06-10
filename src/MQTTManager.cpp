@@ -278,7 +278,7 @@ void MQTTManager::disconnect() {
     xSemaphoreGive(mutex);
 }
 
-bool MQTTManager::isConnected() const {
+bool MQTTManager::isConnected() const noexcept {
     // Use event group bits instead of internal connected flag
     // This is more reliable as the event bits are properly set/cleared
     if (!mqttEventGroup) {

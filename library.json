@@ -27,6 +27,7 @@
   "platforms": ["espressif32"],
   "include": "MQTTManager.h",
   "dependencies": {
-    "ESP32-LibraryCommon": "https://github.com/packerlschupfer/ESP32-LibraryCommon.git"
+    "ESP32-LibraryCommon": "https://github.com/packerlschupfer/ESP32-LibraryCommon.git",
+    "ESP32-MQTTClient": "https://github.com/packerlschupfer/ESP32-MQTTClient.git"
   }
 }
