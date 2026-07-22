@@ -8,15 +8,18 @@ on:
 
 jobs:
   build:
-    name: Compile examples (PlatformIO / esp32)
+    name: Compile examples (pioarduino / Arduino core 3.3.x)
     runs-on: ubuntu-24.04
+
     steps:
       - uses: actions/checkout@v4
         with:
           submodules: recursive
+
       - uses: actions/setup-python@v5
         with:
           python-version: '3.x'
+
       - name: Cache PlatformIO
         uses: actions/cache@v4
         with:
@@ -25,26 +28,41 @@ jobs:
             ~/.cache/pip
           key: pio-${{ runner.os }}-${{ hashFiles('library.json', 'examples/**/platformio.ini') }}
           restore-keys: pio-${{ runner.os }}-
+
       - name: Install PlatformIO
         run: pip install --upgrade platformio
+
       - name: Compile examples
         run: |
           set -u
           shopt -s nullglob
+
           attempted=0
           failed=0
           for d in examples/*/; do
             [ -f "${d}platformio.ini" ] || continue
+
             echo "::group::pio run -d $d"
             n=0
             until pio run -d "$d"; do
               n=$((n + 1))
-              if [ "$n" -ge 3 ]; then failed=$((failed + 1)); echo "FAILED: $d"; break; fi
-              echo "::warning::transient PlatformIO install/copy failure on $d, retry $n"
+              if [ "$n" -ge 3 ]; then
+                failed=$((failed + 1))
+                echo "FAILED: $d"
+                break
+              fi
+              echo "::warning::transient failure on $d, retry $n"
               rm -rf "${d}.pio"
             done
             echo "::endgroup::"
             attempted=$((attempted + 1))
+
+            # Always clear the build dir. `symlink://../..` links the repo into
+            # .pio/libdeps, and a leftover .pio inside that linked copy can send
+            # the dependency finder into a loop (OSError: too many levels of
+            # symbolic links) on a later example.
+            rm -rf "${d}.pio"
           done
+
           echo "Attempted $attempted example(s); $failed failed."
           [ "$attempted" -gt 0 ] && [ "$failed" -eq 0 ]
