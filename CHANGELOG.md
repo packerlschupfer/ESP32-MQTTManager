@@ -5,6 +5,16 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Fixed
+- `publish()` no longer takes the instance mutex with `portMAX_DELAY`. It now waits
+  at most `MQTT_DEFAULT_TIMEOUT_MS` (5 s) and returns `MQTTError::TIMEOUT` instead of
+  blocking the calling task indefinitely. A caller that publishes from its main loop
+  could otherwise be pinned past its task watchdog while another task held the mutex
+  inside a stalled `esp_mqtt_client_publish()`; on a device with panic-on-timeout this
+  rebooted the system. Callers must treat `TIMEOUT` as a dropped message.
+
 ## [0.1.0] - 2025-12-04
 
 ### Added

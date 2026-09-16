@@ -332,7 +332,18 @@ MQTTResult<void> MQTTManager::publish(const char* topic, const char* payload, in
 
     if (!mutex) return MQTTResult<void>::error(MQTTError::NOT_INITIALIZED);
 
-    xSemaphoreTake(mutex, portMAX_DELAY);
+    // Bounded wait, never portMAX_DELAY. publish() is called from application
+    // tasks on every loop iteration, so it must not be able to block forever:
+    // a holder wedged inside esp_mqtt_client_publish() (transport stalled) used
+    // to pin the caller past its 30 s task watchdog, and with panic-on-timeout
+    // that reboots the whole device. Dropping one message beats a reboot.
+    // Note this bounds CONTENTION only - a hang inside the esp-mqtt api_lock
+    // itself is still the caller's problem and still trips the watchdog.
+    if (xSemaphoreTake(mutex, pdMS_TO_TICKS(MQTT_DEFAULT_TIMEOUT_MS)) != pdTRUE) {
+        MQTTM_LOG_E("publish() mutex timeout after %lu ms - dropping message to %s",
+                    (unsigned long)MQTT_DEFAULT_TIMEOUT_MS, topic);
+        return MQTTResult<void>::error(MQTTError::TIMEOUT);
+    }
 
     if (!mqttClient) {
         MQTTM_LOG_E("MQTT client is null");
