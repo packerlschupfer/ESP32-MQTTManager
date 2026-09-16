@@ -8,6 +8,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Fixed
+- `configureClient()` now sets the esp-mqtt network timeout to `MQTT_NETWORK_TIMEOUT_MS`
+  (3 s) instead of leaving esp-mqtt's 10 s default. That default is far longer than a
+  broker on the same LAN needs, and it also bounds how long `esp_mqtt_client_stop()`
+  blocks while tearing the client down: a measured teardown took ~10.4 s, which
+  overran the 10 s window espota allows a device to answer an OTA invitation.
+  Requires `ESP32MQTTClient::setNetworkTimeout()`.
 - `publish()` no longer takes the instance mutex with `portMAX_DELAY`. It now waits
   at most `MQTT_DEFAULT_TIMEOUT_MS` (5 s) and returns `MQTTError::TIMEOUT` instead of
   blocking the calling task indefinitely. A caller that publishes from its main loop

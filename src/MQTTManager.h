@@ -44,6 +44,11 @@ constexpr size_t MQTT_MAX_TOPIC_LENGTH = 100;
 constexpr size_t MQTT_MAX_PAYLOAD_LENGTH = 256;
 constexpr size_t MQTT_QUEUE_SIZE = 10;
 constexpr uint32_t MQTT_DEFAULT_TIMEOUT_MS = 5000;
+// Abort a network operation that has not completed after this long. esp-mqtt
+// defaults to 10 s, which is far more than a broker on the same LAN needs and also
+// bounds how long esp_mqtt_client_stop() blocks: a measured teardown took ~10.4 s,
+// overrunning the 10 s window espota allows a device to answer an OTA invitation.
+constexpr uint32_t MQTT_NETWORK_TIMEOUT_MS = 3000;
 constexpr uint16_t MQTT_DEFAULT_KEEPALIVE_S = 30;
 constexpr uint32_t MQTT_RECONNECT_DELAY_MS = 1000;
 constexpr uint32_t MQTT_MAX_RECONNECT_DELAY_MS = 30000;

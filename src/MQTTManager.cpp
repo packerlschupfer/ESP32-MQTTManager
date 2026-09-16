@@ -210,6 +210,10 @@ void MQTTManager::configureClient() {
     // Set keep alive
     mqttClient->setKeepAlive(MQTT_DEFAULT_KEEPALIVE_S);
 
+    // Bound network operations. Without this esp-mqtt uses its 10 s default, which
+    // also governs how long esp_mqtt_client_stop() blocks during teardown.
+    mqttClient->setNetworkTimeout(MQTT_NETWORK_TIMEOUT_MS);
+
     // Set last will if configured
     if (!lastWillTopic.empty()) {
         MQTTM_LOG_D("Setting last will - topic: %s", lastWillTopic.c_str());
