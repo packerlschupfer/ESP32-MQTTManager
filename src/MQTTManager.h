@@ -37,6 +37,7 @@
 #include <unordered_map>
 #include <string>
 #include <functional>
+#include <atomic>
 #include "freertos/semphr.h"
 
 // Maximum sizes for MQTT messages
@@ -48,7 +49,21 @@ constexpr uint32_t MQTT_DEFAULT_TIMEOUT_MS = 5000;
 // defaults to 10 s, which is far more than a broker on the same LAN needs and also
 // bounds how long esp_mqtt_client_stop() blocks: a measured teardown took ~10.4 s,
 // overrunning the 10 s window espota allows a device to answer an OTA invitation.
-constexpr uint32_t MQTT_NETWORK_TIMEOUT_MS = 3000;
+// 5 s, not 3 s: this also decides how quickly a stalled transport write makes
+// esp-mqtt abort the connection (mqtt_write_data -> esp_mqtt_abort_connection),
+// and that abort dispatches MQTT_EVENT_DISCONNECTED inline in the publishing
+// task - which re-enters onDisconnect() and the instance mutex. Until that
+// re-entrancy is removed, a shorter timeout simply makes that path easier to
+// reach. 5 s still leaves the OTA teardown inside espota's 10 s window.
+constexpr uint32_t MQTT_NETWORK_TIMEOUT_MS = 5000;
+
+// Mutex wait for handlers invoked FROM the esp-mqtt task. These must never block:
+// esp-mqtt dispatches MQTT_EVENT_CONNECTED/DISCONNECTED inline in whichever task
+// triggered them, so a publishing task that already holds the instance mutex would
+// otherwise re-enter it and deadlock against itself on a non-recursive mutex. Kept
+// short because the guarded work is only bookkeeping - the connection flag itself
+// is atomic and is written outside the guard.
+constexpr uint32_t MQTT_EVENT_HANDLER_TIMEOUT_MS = 100;
 constexpr uint16_t MQTT_DEFAULT_KEEPALIVE_S = 30;
 constexpr uint32_t MQTT_RECONNECT_DELAY_MS = 1000;
 constexpr uint32_t MQTT_MAX_RECONNECT_DELAY_MS = 30000;
@@ -224,7 +239,18 @@ public:
 
     // Connection control
     [[nodiscard]] MQTTResult<void> connect();
-    void disconnect();
+    /**
+     * @brief Disconnect and destroy the underlying client.
+     * @return true if a live client was actually torn down, false if there was
+     *         nothing to tear down or the instance mutex could not be acquired.
+     *
+     * Callers that need to know whether resources were really released (for example
+     * an OTA handler freeing DRAM for a transfer) must use this return value rather
+     * than testing isConnected() beforehand: isConnected() reads the event-group bit,
+     * while the teardown is guarded by the client's own flag, and the two diverge
+     * briefly during disconnect event handling.
+     */
+    bool disconnect();
     bool isConnected() const noexcept;
 
     /**
@@ -321,7 +347,9 @@ private:
     
     // State
     bool initialized_ = false;  // Track if begin() was successfully called
-    bool connected;
+    // Atomic and written OUTSIDE the instance mutex: the esp-mqtt connect/disconnect
+    // handlers run inline in arbitrary tasks, so they must not block to update it.
+    std::atomic<bool> connected;
     bool loopStarted = false;  // Track if loopStart() has been called
     bool debugEnabled = false;
     bool autoReconnect = true;

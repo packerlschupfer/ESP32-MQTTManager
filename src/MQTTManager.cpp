@@ -281,17 +281,25 @@ MQTTResult<void> MQTTManager::connect() {
     return MQTTResult<void>::ok();
 }
 
-void MQTTManager::disconnect() {
-    if (!mutex) return;
-    
-    xSemaphoreTake(mutex, portMAX_DELAY);
-    
+bool MQTTManager::disconnect() {
+    if (!mutex) return false;
+
+    // Bounded: a caller blocked here behind a stalled publish would be stuck with no
+    // way to report it. Failing is better - the caller learns nothing was torn down.
+    if (xSemaphoreTake(mutex, pdMS_TO_TICKS(MQTT_DEFAULT_TIMEOUT_MS)) != pdTRUE) {
+        MQTTM_LOG_E("disconnect() mutex timeout after %lu ms - nothing torn down",
+                    (unsigned long)MQTT_DEFAULT_TIMEOUT_MS);
+        return false;
+    }
+
+    bool tornDown = false;
     if (mqttClient && mqttClient->isConnected()) {
         MQTTM_LOG_I("Disconnecting from MQTT broker");
         mqttClient->disconnect();
         loopStarted = false;
+        tornDown = true;
     }
-    
+
     if (connected) {
         connected = false;
         if (mqttEventGroup) {
@@ -299,8 +307,9 @@ void MQTTManager::disconnect() {
             xEventGroupClearBits(mqttEventGroup, MQTT_CONNECTED_BIT);
         }
     }
-    
+
     xSemaphoreGive(mutex);
+    return tornDown;
 }
 
 bool MQTTManager::isConnected() const noexcept {
@@ -616,15 +625,20 @@ void MQTTManager::enableDebugging(bool enable) {
 void MQTTManager::onConnect() {
     if (!mutex) return;
 
-    xSemaphoreTake(mutex, portMAX_DELAY);
+    // Outside the guard, and atomic: esp-mqtt dispatches this inline in whichever
+    // task triggered the connect, which may already hold the instance mutex.
     connected = true;
 
-    // Reset reconnection state on successful connection
-    reconnectAttempts = 0;
-    currentReconnectDelay = reconnectConfig.minInterval;
+    // Bookkeeping only - best effort, never block here (see the constant's comment).
+    if (xSemaphoreTake(mutex, pdMS_TO_TICKS(MQTT_EVENT_HANDLER_TIMEOUT_MS)) == pdTRUE) {
+        reconnectAttempts = 0;
+        currentReconnectDelay = reconnectConfig.minInterval;
+        xSemaphoreGive(mutex);
+    } else {
+        MQTTM_LOG_W("onConnect: mutex busy, reconnect counters not reset");
+    }
 
     MQTTM_LOG_I("MQTT connected");
-    xSemaphoreGive(mutex);
 
     // Notify event (outside mutex to avoid deadlock)
     notifyEvent(MQTTEvent::CONNECTED);
@@ -637,27 +651,36 @@ void MQTTManager::onConnect() {
 
 void MQTTManager::onDisconnect() {
     if (!mutex) return;
-    
-    xSemaphoreTake(mutex, portMAX_DELAY);
+
+    // Outside the guard, and atomic. This is the deadlock that mattered: esp-mqtt
+    // calls esp_mqtt_abort_connection() when a transport write stalls, which
+    // dispatches MQTT_EVENT_DISCONNECTED INLINE in the publishing task - and that
+    // task is already holding this mutex inside publish(). Taking it here with
+    // portMAX_DELAY was a permanent self-deadlock on a non-recursive mutex, after
+    // which the task never fed its watchdog again.
     connected = false;
-    
+
     MQTTM_LOG_I("MQTT disconnected");
-    
-    // Start reconnection timer if auto-reconnect is enabled
-    if (autoReconnect && reconnectTimer) {
-        MQTTM_LOG_I("Starting reconnection timer");
-        xTimerStart(reconnectTimer, 0);
-    } else if (autoReconnect && !reconnectTimer) {
-        // Fallback to task-based reconnection if timer not configured
-        if (!reconnectTask) {
-            MQTTM_LOG_I("Starting reconnection task");
-            xTaskCreate(reconnectTaskFunc, "mqtt_reconnect", 4096, this, 1, &reconnectTask);
-        } else {
-            MQTTM_LOG_I("Reconnection task already running");
+
+    // Bookkeeping only - best effort, never block here.
+    if (xSemaphoreTake(mutex, pdMS_TO_TICKS(MQTT_EVENT_HANDLER_TIMEOUT_MS)) == pdTRUE) {
+        // Start reconnection timer if auto-reconnect is enabled
+        if (autoReconnect && reconnectTimer) {
+            MQTTM_LOG_I("Starting reconnection timer");
+            xTimerStart(reconnectTimer, 0);
+        } else if (autoReconnect && !reconnectTimer) {
+            // Fallback to task-based reconnection if timer not configured
+            if (!reconnectTask) {
+                MQTTM_LOG_I("Starting reconnection task");
+                xTaskCreate(reconnectTaskFunc, "mqtt_reconnect", 4096, this, 1, &reconnectTask);
+            } else {
+                MQTTM_LOG_I("Reconnection task already running");
+            }
         }
+        xSemaphoreGive(mutex);
+    } else {
+        MQTTM_LOG_W("onDisconnect: mutex busy, reconnect not scheduled here");
     }
-    
-    xSemaphoreGive(mutex);
     
     // Notify event (outside mutex to avoid deadlock)
     notifyEvent(MQTTEvent::DISCONNECTED);
