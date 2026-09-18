@@ -811,7 +811,8 @@ void MQTTManager::reconnectTaskFunc(void* param) {
     while (manager->autoReconnect) {
         if (!manager->isConnected()) {
             // Wait for the reconnect delay FIRST
-            MQTTM_LOG_I("Waiting %d ms before reconnection attempt", manager->currentReconnectDelay);
+            MQTTM_LOG_I("Waiting %lu ms before reconnection attempt",
+                        static_cast<unsigned long>(manager->currentReconnectDelay));
             vTaskDelay(pdMS_TO_TICKS(manager->currentReconnectDelay));
             
             // Check again after delay in case we connected elsewhere
@@ -1013,9 +1014,9 @@ void MQTTManager::reconnectTimerCallback(TimerHandle_t xTimer) {
             return;
         }
 
-        MQTTM_LOG_I("Reconnection attempt %d/%d",
-            manager->reconnectAttempts + 1,
-            manager->reconnectConfig.maxAttempts);
+        MQTTM_LOG_I("Reconnection attempt %lu/%lu",
+            static_cast<unsigned long>(manager->reconnectAttempts + 1),
+            static_cast<unsigned long>(manager->reconnectConfig.maxAttempts));
 
         // Increment attempt counter BEFORE calling connect()
         // Note: connect() is async - it returns Ok when connection is initiated,
