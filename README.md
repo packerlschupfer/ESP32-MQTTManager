@@ -20,8 +20,12 @@ MQTTManager provides a high-level interface for MQTT communication on ESP32 devi
 ## Dependencies
 
 - ESP32 Arduino Core
-- ESP32MQTTClient library
+- [ESP32-MQTTClient](https://github.com/packerlschupfer/ESP32-MQTTClient) (declared in `library.json`)
+- [ESP32-LibraryCommon](https://github.com/packerlschupfer/ESP32-LibraryCommon) (declared in `library.json`)
 - FreeRTOS (included with ESP32)
+- Optional: [ESP32-Logger](https://github.com/packerlschupfer/ESP32-Logger), only when building
+  with `USE_CUSTOM_LOGGER`. Not declared in `library.json`; the application supplies it (see
+  [Using Custom Logger](#using-custom-logger)).
 
 ## Installation
 
@@ -30,8 +34,8 @@ MQTTManager provides a high-level interface for MQTT communication on ESP32 devi
 Add to your `platformio.ini`:
 
 ```ini
-lib_deps = 
-    https://github.com/your-username/MQTTManager
+lib_deps =
+    https://github.com/packerlschupfer/ESP32-MQTTManager.git
 ```
 
 ### Arduino IDE
@@ -192,10 +196,25 @@ To use the custom Logger library, define `USE_CUSTOM_LOGGER` in your build flags
 
 ```ini
 build_flags = -DUSE_CUSTOM_LOGGER
-lib_deps = 
-    Logger  ; Must include Logger library when using custom logger
-    MQTTManager
+lib_deps =
+    https://github.com/packerlschupfer/ESP32-Logger.git        ; required with USE_CUSTOM_LOGGER
+    https://github.com/packerlschupfer/ESP32-MQTTManager.git
 ```
+
+ESP32-Logger is deliberately **not** listed in this library's `library.json`. That follows
+the convention the other ESP32-* libraries use: the application decides whether to use the
+custom logger, and supplies it. Builds that use ESP-IDF logging never have to download it.
+With `USE_CUSTOM_LOGGER` defined, `MQTTManagerLogging.h` includes `<LogInterface.h>`, so
+ESP32-Logger has to be in the application's `lib_deps`. Otherwise the build fails with
+`fatal error: LogInterface.h: No such file or directory`.
+
+The same error can also appear when ESP32-Logger *is* in `lib_deps` but this library got
+into the build unintentionally. For example, another library includes `IMqttMessageHandler.h`
+behind an `#ifdef`, and PlatformIO's dependency finder (which ignores `#ifdef`s in its default
+`chain` mode) finds MQTTManager in the global library dir (`~/.platformio/lib`). MQTTManager is
+then compiled without its own dependencies resolved. It doesn't show up under "Dependency
+Graph" in the build output, and Logger's include path is missing for it. If the application
+doesn't use MQTT, exclude it with `lib_ignore = ESP32-MQTTManager`.
 
 Your application must include LogInterfaceImpl.h:
 
@@ -244,9 +263,9 @@ framework = arduino
 build_flags = 
     -DMQTTMANAGER_DEBUG     ; Enable debug logs for MQTTManager
     -DUSE_CUSTOM_LOGGER     ; Optional: Use custom logger
-lib_deps = 
-    Logger                  ; Required only when USE_CUSTOM_LOGGER is defined
-    MQTTManager
+lib_deps =
+    https://github.com/packerlschupfer/ESP32-Logger.git       ; Required only when USE_CUSTOM_LOGGER is defined
+    https://github.com/packerlschupfer/ESP32-MQTTManager.git
 ```
 
 ### Advanced Debug Options

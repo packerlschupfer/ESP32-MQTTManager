@@ -7,6 +7,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+- README: documented that ESP32-Logger is deliberately not declared in `library.json`. A
+  `USE_CUSTOM_LOGGER` build must list it in the application's own `lib_deps`, otherwise it
+  fails with `LogInterface.h: No such file or directory`. Also documented the second way to
+  hit that error: the library gets pulled in from the global lib dir through another
+  library's `#ifdef`-guarded include, and is then compiled without its dependencies
+  resolved (workaround: `lib_ignore = ESP32-MQTTManager`). Replaced the placeholder install
+  URL and the old `Logger`/`MQTTManager` lib_deps names with the real repository URLs, and
+  listed ESP32-LibraryCommon as a dependency.
+
 ### Fixed
 - **Self-deadlock in the publish path removed.** `onDisconnect()` and `onConnect()` took the
   instance mutex with `portMAX_DELAY`. esp-mqtt calls `esp_mqtt_abort_connection()` when a
