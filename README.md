@@ -1,25 +1,34 @@
-# MQTTManager Library
+# ESP32-MQTTManager
 
-A thread-safe MQTT manager library for ESP32 using FreeRTOS and ESP32MQTTClient.
+A thread-safe MQTT manager for ESP32 (Arduino framework), built on
+[ESP32-MQTTClient](https://github.com/packerlschupfer/ESP32-MQTTClient) and FreeRTOS.
 
 ## Overview
 
-MQTTManager provides a high-level interface for MQTT communication on ESP32 devices. It wraps the ESP32MQTTClient library with additional features including event-driven architecture, message queuing, and legacy callback support.
+`MQTTManager` is a singleton that owns the device's MQTT connection. It wraps ESP32-MQTTClient
+(esp-mqtt) and adds:
+- configuration through `begin()` or the `MQTTConfig` builder
+- auto-reconnect with exponential backoff
+- events delivered three ways: a callback, a FreeRTOS event group, or an external event group
+- `common::Result`-based error handling from ESP32-LibraryCommon
+- bounded mutex waits on the paths that run during a stalled network
 
 ## Features
 
-- Thread-safe MQTT operations with FreeRTOS integration
-- Event-driven architecture using FreeRTOS event groups
-- Message queuing for asynchronous processing
-- Multiple subscription callback styles (lambda and interface-based)
-- Automatic client ID generation from ESP32 chip ID
-- Last Will and Testament support
-- Debug logging with conditional compilation
-- Connection state management and monitoring
+- Singleton access via `MQTTManager::getInstance()`
+- `MQTTConfig` builder: client ID, credentials, keep-alive, Last Will, auto-reconnect
+- Client ID generated from the chip's eFuse MAC when none is given (`ESP32_<MAC>`)
+- `[[nodiscard]] MQTTResult<void>` return values for `begin()`, `connect()`, `publish()` and `subscribe()`
+- Subscriptions with lambda callbacks (payload, or topic + payload) or `IMqttMessageHandler` objects
+- Tracks broker SUBACKs: `isSubscriptionConfirmed()`, `getSubscriptionQos()`
+- Auto-reconnect with exponential backoff (`ReconnectConfig`)
+- Event callback plus FreeRTOS event-group bits (internal, or bits you choose in your own group)
+- `publish()` waits at most 5 s for the instance mutex and returns `MQTTError::TIMEOUT` instead of blocking
+- ESP-IDF logging by default, or ESP32-Logger with `USE_CUSTOM_LOGGER`
 
 ## Dependencies
 
-- ESP32 Arduino Core
+- ESP32 Arduino Core (pioarduino / Arduino core 3.x is what CI builds)
 - [ESP32-MQTTClient](https://github.com/packerlschupfer/ESP32-MQTTClient) (declared in `library.json`)
 - [ESP32-LibraryCommon](https://github.com/packerlschupfer/ESP32-LibraryCommon) (declared in `library.json`)
 - FreeRTOS (included with ESP32)
@@ -34,147 +43,228 @@ MQTTManager provides a high-level interface for MQTT communication on ESP32 devi
 Add to your `platformio.ini`:
 
 ```ini
+build_unflags = -std=gnu++11
+build_flags = -std=gnu++17
 lib_deps =
     https://github.com/packerlschupfer/ESP32-MQTTManager.git
 ```
 
-### Arduino IDE
+The library needs C++17. `examples/SmokeTest` is a minimal, self-contained project that
+compiles against the whole public API.
 
-1. Download the library as a ZIP file
-2. In Arduino IDE: Sketch → Include Library → Add .ZIP Library
-3. Select the downloaded file
+## Usage
 
-## Usage Examples
+All examples assume `#include <MQTTManager.h>` and
+`MQTTManager& mqtt = MQTTManager::getInstance();`. Bring up the network (WiFi/Ethernet) first.
 
-### Basic Connection
+### Connecting
+
+`begin()` only stores the configuration. `connect()` starts the client, and the connection
+completes asynchronously.
 
 ```cpp
-#include <MQTTManager.h>
+auto result = mqtt.begin(
+    MQTTConfig("mqtt://broker.local:1883")
+        .withClientId("esp32-device")          // optional: default is ESP32_<eFuse MAC>
+        .withCredentials("user", "pass")
+        .withKeepAlive(60)                     // seconds, default 30
+        .withLastWill("device/status", "offline", 0, true)
+        .withAutoReconnect(true));             // default true
+if (!result) {
+    Serial.printf("begin failed: %d\n", static_cast<int>(result.error()));
+}
 
-MQTTManager mqtt;
-
-void setup() {
-    // Basic connection
-    mqtt.begin("mqtt://broker.hivemq.com:1883");
-    mqtt.connect();
-    
-    // With authentication
-    mqtt.begin("mqtt://broker.example.com:1883", "client_id", "username", "password");
-    mqtt.connect();
+if (mqtt.connect() && mqtt.waitForConnection(5000)) {
+    Serial.println("Connected");
 }
 ```
 
-### Publishing Messages
+The short form `mqtt.begin("mqtt://broker.local", "clientId", "user", "pass")` is also
+available; every argument after the URI is optional.
+
+### Publishing
 
 ```cpp
-// Publish with default QoS 0
-mqtt.publish("sensor/temperature", "25.5");
+auto r = mqtt.publish("sensor/temperature", "25.5");          // QoS 0, not retained
+mqtt.publish("sensor/status", "online", 1, true).isOk();      // QoS 1, retained
+mqtt.publish("test/message", String("Hello"));                 // Arduino String overload
 
-// Publish with QoS and retain
-mqtt.publish("sensor/status", "online", 1, true);
-
-// Publish String object
-String payload = "Hello World";
-mqtt.publish("test/message", payload);
+if (r.isError() && r.error() == MQTTError::TIMEOUT) {
+    // Instance mutex not available within 5 s: the message was dropped.
+}
 ```
 
-### Subscribing to Topics
+`publish()` never blocks for longer than `MQTT_DEFAULT_TIMEOUT_MS` (5 s) on the instance mutex.
+On `MQTTError::TIMEOUT` the message was **not** sent, so the caller should treat it as dropped.
+
+### Subscribing
 
 ```cpp
-// Lambda callback with payload only
-mqtt.subscribe("sensor/command", [](const String& payload) {
-    Serial.println("Received: " + payload);
-});
+// Payload only
+mqtt.subscribe("device/command", [](const String& payload) {
+    Serial.println(payload);
+}, 1).isOk();
 
-// Lambda callback with topic and payload
+// Topic and payload (useful with wildcards)
 mqtt.subscribe("sensor/+/data", [](const String& topic, const String& payload) {
-    Serial.printf("Topic: %s, Payload: %s\n", topic.c_str(), payload.c_str());
-});
+    Serial.printf("%s: %s\n", topic.c_str(), payload.c_str());
+}).isOk();
 
-// Interface-based handler (legacy support)
+// Did the broker accept it?
+if (mqtt.isSubscriptionConfirmed("device/command")) {
+    int qos = mqtt.getSubscriptionQos("device/command");  // 0-2, 0x80 = rejected
+}
+```
+
+`subscribe()` returns `MQTTError::SUBSCRIBE_FAILED` when the SUBSCRIBE could not be sent
+(transport down, outbox full). Callbacks run in the MQTT client's task context, so keep them
+short and hand longer work off to your own task.
+
+### Interface-based handlers
+
+```cpp
 class MyHandler : public IMqttMessageHandler {
+public:
     void handleMessage(const std::string& topic, const std::string& payload) override {
-        // Handle message
+        // ...
     }
 };
 
 MyHandler handler;
-mqtt.registerTopicHandler("legacy/topic", &handler);
+mqtt.registerTopicHandler("legacy/topic", &handler);   // registers and subscribes (QoS 0)
 ```
 
-### Event-Driven Processing
+The handler is called directly when a message arrives. The message is also copied into the
+message queue (topic up to 99 chars, payload up to 255 chars, 10 entries). That queue is fed
+only by `registerTopicHandler()` / `subscribe(topic)` subscriptions, not by the callback
+overloads.
+
+### Events
 
 ```cpp
-void processTask(void* param) {
-    MQTTManager* mqtt = (MQTTManager*)param;
-    EventGroupHandle_t events = mqtt->getEventGroup();
-    
-    while (true) {
-        EventBits_t bits = xEventGroupWaitBits(events,
-            MQTTManager::MQTT_CONNECTED_BIT | MQTTManager::MQTT_MESSAGE_RECEIVED_BIT,
-            pdTRUE, pdFALSE, portMAX_DELAY);
-            
-        if (bits & MQTTManager::MQTT_CONNECTED_BIT) {
-            // Handle connection
+mqtt.registerEventCallback([](MQTTManager::MQTTEvent event, void* data) {
+    switch (event) {
+        case MQTTManager::MQTTEvent::CONNECTED:    break;
+        case MQTTManager::MQTTEvent::DISCONNECTED: break;
+        case MQTTManager::MQTTEvent::MESSAGE_RECEIVED: {
+            auto* m = static_cast<MQTTManager::MessageEventData*>(data);  // topic, payload
+            break;
         }
-        
-        if (bits & MQTTManager::MQTT_MESSAGE_RECEIVED_BIT) {
-            MqttMessage msg;
-            if (xQueueReceive(mqtt->getMessageQueue(), &msg, 0)) {
-                // Process message
-            }
+        case MQTTManager::MQTTEvent::SUBSCRIBE_COMPLETE: {
+            auto* s = static_cast<MQTTManager::SubscribeAckEventData*>(data);  // msgId, topic, grantedQos
+            break;
         }
+        case MQTTManager::MQTTEvent::ERROR: {
+            auto* e = static_cast<MQTTManager::ErrorEventData*>(data);  // error, message
+            break;
+        }
+        default: break;   // PUBLISH_COMPLETE is declared but not emitted yet
     }
-}
+});
 ```
 
-### Configuration Options
+`data` points to stack data that is only valid during the callback; copy anything you need.
+`ERROR` is emitted when auto-reconnect gives up after `maxAttempts`.
+
+Alternatively, wait on the manager's own event group (`MQTT_CONNECTED_BIT`,
+`MQTT_DISCONNECTED_BIT`, `MQTT_MESSAGE_RECEIVED_BIT`):
 
 ```cpp
-// Set keep-alive interval
-mqtt.setKeepAlive(60);  // 60 seconds
+EventBits_t bits = xEventGroupWaitBits(mqtt.getEventGroup(),
+    MQTTManager::MQTT_CONNECTED_BIT | MQTTManager::MQTT_MESSAGE_RECEIVED_BIT,
+    pdTRUE, pdFALSE, portMAX_DELAY);
+```
 
-// Configure Last Will
-mqtt.setLastWill("device/status", "offline", 0, true);
+You can also have it set bits in an event group you own:
 
-// Enable debug output (requires MQTTMANAGER_DEBUG defined)
-mqtt.enableDebugging(true);
+```cpp
+mqtt.setEventGroup(myEventGroup);
+mqtt.setEventBits(MY_MQTT_UP_BIT, MY_MQTT_DOWN_BIT, MY_MQTT_MSG_BIT);   // 0 = don't set
+```
 
-// Wait for connection with timeout
-if (mqtt.waitForConnection(5000)) {
-    Serial.println("Connected!");
+### Reconnecting
+
+Auto-reconnect is on by default. To tune it:
+
+```cpp
+MQTTManager::ReconnectConfig rc;
+rc.minInterval = 1000;        // ms
+rc.maxInterval = 30000;       // ms
+rc.maxAttempts = 10;
+rc.exponentialBackoff = true;
+mqtt.setAutoReconnect(true, rc);
+```
+
+### Disconnecting
+
+```cpp
+if (mqtt.disconnect()) {
+    // A live client was torn down and its resources released (e.g. before an OTA transfer).
 }
 ```
+
+`disconnect()` returns `false` when there was nothing to tear down, or when the instance
+mutex could not be taken within 5 s. Use its return value rather than `isConnected()` to know
+whether resources were freed. esp-mqtt's network timeout is set to 5 s
+(`MQTT_NETWORK_TIMEOUT_MS`), so a teardown fits inside espota's 10 s connect-back window.
 
 ## API Reference
 
-### Core Methods
+### Setup and connection
 
-- `begin(uri, clientID, username, password)` - Initialize MQTT connection parameters
-- `connect()` - Initiate connection to broker
-- `disconnect()` - Disconnect from broker
-- `isConnected()` - Check connection status
-- `publish(topic, payload, qos, retain)` - Publish message
-- `subscribe(topic, callback, qos)` - Subscribe with callback
-- `unsubscribe(topic)` - Unsubscribe from topic
+| Method | Returns | Notes |
+|---|---|---|
+| `getInstance()` | `MQTTManager&` | The singleton |
+| `begin(uri, clientId, user, pass)` | `MQTTResult<void>` | Stores config; `clientId`/`user`/`pass` optional |
+| `begin(const MQTTConfig&)` | `MQTTResult<void>` | Builder form |
+| `connect()` | `MQTTResult<void>` | `NOT_INITIALIZED` before `begin()`, `ALREADY_CONNECTED` |
+| `disconnect()` | `bool` | `true` only if a live client was torn down |
+| `isConnected()` / `isInitialized()` | `bool` | |
+| `waitForConnection(timeoutMs = 5000)` | `bool` | Blocks on `MQTT_CONNECTED_BIT` |
 
-### Configuration Methods
+### Messaging
 
-- `setKeepAlive(seconds)` - Set keep-alive interval
-- `setLastWill(topic, payload, qos, retain)` - Configure Last Will
-- `enableDebugging(enable)` - Enable/disable debug output
+| Method | Returns | Notes |
+|---|---|---|
+| `publish(topic, payload, qos = 0, retain = false)` | `MQTTResult<void>` | `const char*` and `String` payloads; `TIMEOUT` = dropped |
+| `subscribe(topic, cb(payload), qos = 0)` | `MQTTResult<void>` | |
+| `subscribe(topic, cb(topic, payload), qos = 0)` | `MQTTResult<void>` | |
+| `subscribe(topic)` | `MQTTResult<void>` | Interface-handler/queue path, QoS 0 |
+| `registerTopicHandler(topic, IMqttMessageHandler*)` | `bool` | Registers and subscribes |
+| `unsubscribe(topic)` | `bool` | |
+| `isSubscriptionConfirmed(topic)` | `bool` | SUBACK received |
+| `getSubscriptionQos(topic)` | `int` | 0-2 granted, -1 pending, 0x80 rejected, -2 unknown |
+| `processMessages(max = 1, timeout = 0)` | `bool` | Drains the queue into registered handlers |
+| `getMessageQueue()` / `clearMessageQueue()` | | Queue of `MqttMessage` |
 
-### Event Methods
+### Configuration and events
 
-- `waitForConnection(timeoutMs)` - Block until connected
-- `getEventGroup()` - Get FreeRTOS event group handle
-- `getMessageQueue()` - Get message queue handle
+| Method | Notes |
+|---|---|
+| `setKeepAlive(seconds)` | Same as `MQTTConfig::withKeepAlive` |
+| `setLastWill(topic, payload, qos, retain)` | QoS is ignored; ESP32-MQTTClient sends LWT at QoS 0 |
+| `setAutoReconnect(enable[, ReconnectConfig])` | |
+| `enableDebugging(enable)` | Turns on ESP32-MQTTClient's debug messages |
+| `registerEventCallback(cb)` | `void(MQTTEvent, void* data)` |
+| `getEventGroup()` | Internal group with `MQTT_*_BIT` |
+| `setEventGroup(group)` / `setEventBits(conn, disc, msg)` | Mirror events into your own group |
 
-### Event Bits
+### Errors (`MQTTError`)
 
-- `MQTT_CONNECTED_BIT` - Set when connected
-- `MQTT_DISCONNECTED_BIT` - Set when disconnected  
-- `MQTT_MESSAGE_RECEIVED_BIT` - Set when message received
+`OK`, `NOT_INITIALIZED`, `ALREADY_CONNECTED`, `CONNECTION_FAILED`, `BROKER_UNREACHABLE`,
+`PUBLISH_FAILED`, `SUBSCRIBE_FAILED`, `INVALID_PARAMETER`, `MEMORY_ALLOCATION_FAILED`,
+`TIMEOUT`, `UNKNOWN_ERROR`.
+
+### Tunables (`MQTTManager.h`)
+
+| Constant | Value | Meaning |
+|---|---|---|
+| `MQTT_DEFAULT_TIMEOUT_MS` | 5000 | Max mutex wait in `publish()` / `disconnect()` |
+| `MQTT_NETWORK_TIMEOUT_MS` | 5000 | esp-mqtt network operation timeout |
+| `MQTT_EVENT_HANDLER_TIMEOUT_MS` | 100 | Mutex wait inside connect/disconnect handlers |
+| `MQTT_DEFAULT_KEEPALIVE_S` | 30 | Default keep-alive |
+| `MQTT_MAX_TOPIC_LENGTH` / `MQTT_MAX_PAYLOAD_LENGTH` | 100 / 256 | Queue entry buffer sizes |
+| `MQTT_QUEUE_SIZE` | 10 | Message queue depth |
 
 ## Logging Configuration
 
@@ -216,21 +306,19 @@ then compiled without its own dependencies resolved. It doesn't show up under "D
 Graph" in the build output, and Logger's include path is missing for it. If the application
 doesn't use MQTT, exclude it with `lib_ignore = ESP32-MQTTManager`.
 
-Your application must include LogInterfaceImpl.h:
+Initialize the Logger once in the application. ESP32-Logger compiles its own
+`LogInterface` implementation, so nothing else needs including:
 
 ```cpp
-// In your main application file
 #include <Logger.h>
-#include <LogInterfaceImpl.h>
 #include <MQTTManager.h>
 
 void setup() {
     // Initialize Logger once for all libraries
     Logger::getInstance().init(1024);
-    
-    // MQTTManager will now use your custom Logger
-    MQTTManager mqtt;
-    mqtt.begin("mqtt://broker.example.com");
+
+    // MQTTManager now logs through the custom Logger
+    MQTTManager::getInstance().begin("mqtt://broker.example.com").isOk();
 }
 ```
 
@@ -246,7 +334,7 @@ build_flags = -DMQTTMANAGER_DEBUG
 
 ```ini
 [env:esp32dev]
-platform = espressif32
+platform = https://github.com/pioarduino/platform-espressif32/releases/download/stable/platform-espressif32.zip
 board = esp32dev
 framework = arduino
 
@@ -255,7 +343,7 @@ build_flags =
     ; -DMQTTMANAGER_DEBUG  ; Commented out for production
 
 [env:esp32dev_debug]
-platform = espressif32
+platform = https://github.com/pioarduino/platform-espressif32/releases/download/stable/platform-espressif32.zip
 board = esp32dev
 framework = arduino
 
@@ -288,28 +376,14 @@ build_flags =
 
 ## Thread Safety
 
-All public methods are designed to be thread-safe. The library uses:
-- FreeRTOS event groups for signaling
-- Queue for message passing
-- Internal state protection
-
-## Suggested Improvements
-
-1. **Add mutex protection for thread safety** - Currently missing mutex protection for shared state
-2. **Implement proper null pointer validation** - Add comprehensive null checks throughout
-3. **Add const correctness** - Many methods should take const parameters
-4. **Fix memory leak risks** - Queue messages may accumulate if not processed
-5. **Add connection retry mechanism** - Auto-reconnect with backoff
-6. **Implement proper error handling** - Return error codes instead of void
-7. **Add parameter validation** - Validate topic/payload lengths
-8. **Fix global state issues** - Remove static instance dependency
-9. **Add timeout parameters** - Methods like publish() should support timeouts
-10. **Implement proper cleanup** - Ensure all resources freed on destruction
-11. **Add SSL/TLS configuration** - Support for secure connections
-12. **Fix callback lifetime issues** - Lambdas may reference destroyed objects
-13. **Add message buffer size configuration** - Currently hardcoded limits
-14. **Implement QoS 2 support** - Currently limited by ESP32MQTTClient
-15. **Add connection event callbacks** - User-defined connect/disconnect handlers
+- Configuration, connection, publish and subscribe methods take an internal FreeRTOS mutex.
+- `publish()` and `disconnect()` wait at most 5 s for it and give up with `TIMEOUT` / `false`.
+- The connect/disconnect handlers that esp-mqtt runs inline (possibly inside a task that is
+  already in `publish()`) wait at most 100 ms and never block on it. The connection flag is a
+  `std::atomic<bool>` updated outside the mutex. This removes a self-deadlock where a stalled
+  publish could hang its own task until the task watchdog fired.
+- Subscription callbacks, interface handlers and the event callback run in the MQTT client's
+  task context.
 
 ## License
 
